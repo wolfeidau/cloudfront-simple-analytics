@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: "wolfeidau: API server powered by HTTP API."
+
+Parameters:
+  AppName:
+    Type: String
+    Description: The name of the application.
+
+  Stage:
+    Type: String
+    Description: The stage of development, e.g., dev, test, prod.
+    Default: dev
+
+  Branch:
+    Type: String
+    Description: The branch used to deploy.
+    Default: master
+
+  LogRetention:
+    Type: Number
+    Default: 14
+
+Outputs:
+  HTTPAPIEndpoint:
+    Description: The API Gateway endpoint address of the REST API.
+    Value: !Sub 'https://${HttpAPI}.execute-api.${AWS::Region}.${AWS::URLSuffix}/'
+  APIFunctionLogGroup:
+    Description: The log group which stores api lambda logs.
+    Value: !Ref APIFunctionLogGroup
+  AuthorizerFunctionLogGroup:
+    Description: The log group which stores authorizer lambda logs.
+    Value: !Ref AuthorizerFunctionLogGroup
+  HTTPAPI:
+    Description: The http API.
+    Value: !Ref HttpAPI
+  HTTPAPIAccessLogGroup:
+    Description: The log group which stores api gateway access logs.
+    Value: !Ref HTTPAPIAccessLogGroup
+
+Globals:
+  Function:
+    Runtime: provided.al2023
+    Architectures:
+      - arm64
+    Timeout: 3
+    MemorySize: 256
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        BRANCH: !Ref Branch
+
+Resources:
+  HTTPAPIAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/AccessLog-${AppName}-${Stage}-${Branch}"
+      RetentionInDays: !Ref LogRetention
+
+  HttpAPI:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        Authorizers:
+          APILambdaAuthorizer:
+            AuthorizerPayloadFormatVersion: '2.0'
+            EnableSimpleResponses: true
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            FunctionInvokeRole: !GetAtt AuthorizerFunctionRole.Arn
+        DefaultAuthorizer: APILambdaAuthorizer
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 10
+        DetailedMetricsEnabled: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt HTTPAPIAccessLogGroup.Arn
+        Format: "$context.requestId $context.domainName $context.httpMethod $context.identity.sourceIp $context.path $context.protocol $context.requestId $context.requestTime $context.status $context.responseLength $context.responseLatency $context.integrationLatency"
+
+  APIFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../dist/analytics-api-lambda.zip
+      Handler: bootstrap
+
+  APIFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${APIFunction}"
+      RetentionInDays: !Ref LogRetention
+
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../dist/api-authorizer-lambda.zip
+      Handler: bootstrap
+
+  AuthorizerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AuthorizerFunction}"
+      RetentionInDays: !Ref LogRetention
+
+  AuthorizerInvokeRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+
+  AuthorizerInvokePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "AuthorizerInvokePolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "lambda:InvokeFunction"
+            Resource: !GetAtt AuthorizerFunction.Arn
+      Roles:
+        - Ref: "AuthorizerInvokeRole"
