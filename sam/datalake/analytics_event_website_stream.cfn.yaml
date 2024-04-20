@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: "wolfeidau: Cloudfront logs processor."
+
+Parameters:
+  AppName:
+    Type: String
+    Description: The name of the application.
+
+  Stage:
+    Type: String
+    Description: The stage of development, e.g., dev, test, prod.
+    Default: dev
+    AllowedPattern: "[a-z]*"
+
+  Branch:
+    Type: String
+    Description: The branch used to deploy.
+    Default: master
+    AllowedPattern: "[a-z]*"
+
+  AnalyticsDatabaseName:
+    Type: String
+    Description: Analytics event database name.
+
+  AnalyticsEventsImportTableName:
+    Type: String
+    Description: Analytics event import table name
+
+  AnalyticsEventsImportBucketName:
+    Type: String
+    Description: Analytics event import bucket name
+
+  PrimarySubDomainName:
+    Description: "Name that is used to create the assets DNS entry."
+    Type: String
+    Default: www
+
+  HostedZoneName:
+    Description: "Name that is used to create the DNS entry."
+    Type: String
+    Default: wolfe.id.au
+
+  RetentionInDays:
+    Description:
+      Retain logs for many days.
+    Type: Number
+    Default: 7
+
+Globals:
+  Function:
+    Runtime: provided.al2023
+    Architectures:
+      - arm64
+    Timeout: 6
+    MemorySize: 128
+    Tracing: Active
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        BRANCH: !Ref Branch
+
+Resources:
+  FirehoseTransformFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../dist/analytics-stream-transform.zip
+      Handler: bootstrap
+
+  FirehoseTransformFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FirehoseTransformFunction}"
+      RetentionInDays: !Ref RetentionInDays
+
+  FirehoseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref RetentionInDays
+
+  FirehoseLogStream:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref FirehoseLogGroup
+
+  FirehoseS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref 'AWS::AccountId'
+
+  FirehoseToS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      Roles:
+        - !Ref FirehoseS3Role
+      PolicyName: "firehose-to-s3"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:AbortMultipartUpload
+              - s3:GetBucketLocation
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+              - s3:PutEncryptionConfiguration
+            Resource:
+              - !Sub arn:${AWS::Partition}:s3:::${AnalyticsEventsImportBucketName}
+              - !Sub arn:${AWS::Partition}:s3:::${AnalyticsEventsImportBucketName}/*
+          - Effect: Allow
+            Action:
+              - glue:GetTable
+              - glue:GetTableVersion
+              - glue:GetTableVersions
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action: logs:PutLogEvents
+            Resource: !GetAtt FirehoseLogGroup.Arn
+          - Effect: Allow
+            Action:
+              - 'lambda:InvokeFunction'
+              - 'lambda:GetFunctionConfiguration'
+            Resource:
+              - !GetAtt FirehoseTransformFunction.Arn
+
+  AnalyticsEventsDynamicFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    DependsOn: FirehoseToS3Policy
+    Properties:
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !Sub arn:${AWS::Partition}:s3:::${AnalyticsEventsImportBucketName}
+        BufferingHints:
+          IntervalInSeconds: 60
+          SizeInMBs: 128
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseLogGroup
+          LogStreamName: !Ref FirehoseLogStream
+        CompressionFormat: UNCOMPRESSED
+        DataFormatConversionConfiguration:
+          Enabled: true
+          InputFormatConfiguration:
+            Deserializer:
+              OpenXJsonSerDe:
+                CaseInsensitive: true
+          OutputFormatConfiguration:
+            Serializer:
+              ParquetSerDe:
+                Compression: SNAPPY
+                EnableDictionaryCompression: false
+          SchemaConfiguration:
+            CatalogId: !Ref AWS::AccountId
+            DatabaseName: !Ref AnalyticsDatabaseName
+            Region: !Ref AWS::Region
+            RoleARN: !GetAtt FirehoseS3Role.Arn
+            TableName: !Ref AnalyticsEventsImportTableName
+            VersionId: LATEST
+        Prefix: !Sub "${AnalyticsEventsImportTableName}/site_fqdn=${PrimarySubDomainName}.${HostedZoneName}/year=!{partitionKeyFromLambda:year}/month=!{partitionKeyFromLambda:month}/day=!{partitionKeyFromLambda:day}/hour=!{partitionKeyFromLambda:hour}/"
+        ErrorOutputPrefix: "Errors/!{firehose:random-string}/!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd}/"
+        RoleARN: !GetAtt FirehoseS3Role.Arn
+        DynamicPartitioningConfiguration:
+          Enabled: true
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt FirehoseTransformFunction.Arn
+              Type: Lambda
+
+  FirehoseNameParam:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/config/${Stage}/${Branch}/${AppName}/analytics_events_firehose_import_stream_name"
+      Type: "String"
+      Value: !Ref AnalyticsEventsDynamicFirehose
+      Description: "Analytics events import kinesis firehose stream name"

@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: "wolfeidau: Analytics event import table."
+
+Parameters:
+  AppName:
+    Type: String
+    Description: The name of the application.
+
+  Stage:
+    Type: String
+    Description: The stage of development, e.g., dev, test, prod.
+    Default: dev
+    AllowedPattern: "[a-z]*"
+
+  Branch:
+    Type: String
+    Description: The branch used to deploy.
+    Default: master
+    AllowedPattern: "[a-z]*"
+
+  AnalyticsDatabaseName:
+    Type: String
+    Description: The name of the Analytics events database.
+    AllowedPattern: "[a-z_]*"
+
+  AnalyticsImportTableName:
+    Type: String
+    Default: analytics_events_import
+    AllowedPattern: "[a-z_]*"
+
+Outputs:
+  AnalyticsImportBucket:
+    Value: !Ref AnalyticsImportBucket
+  AnalyticsImportTable:
+    Value: !Ref AnalyticsImportTable
+
+Resources:
+  AnalyticsImportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: True
+
+  AnalyticsImportBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AnalyticsImportBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:*
+            Resource:
+              - !Sub "arn:aws:s3:::${AnalyticsImportBucket}/*"
+              - !Sub "arn:aws:s3:::${AnalyticsImportBucket}"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  AnalyticsImportTable:
+    Type: AWS::Glue::Table
+    Properties:
+      DatabaseName: !Ref AnalyticsDatabaseName
+      CatalogId: !Ref AWS::AccountId
+      TableInput:
+        Name: !Ref AnalyticsImportTableName
+        StorageDescriptor:
+          Columns:
+            - Name: cf_forwarded_proto
+              Type: string
+            - Name: cf_is_android_vwr
+              Type: string
+            - Name: cf_is_desktop_vwr
+              Type: string
+            - Name: cf_is_ios_vwr
+              Type: string
+            - Name: cf_is_mobile_vwr
+              Type: string
+            - Name: cf_is_smarttv_vwr
+              Type: string
+            - Name: cf_is_tablet_vwr
+              Type: string
+            - Name: cf_vwr_address
+              Type: string
+            - Name: cf_vwr_asn
+              Type: string
+            - Name: cf_vwr_city
+              Type: string
+            - Name: cf_vwr_country
+              Type: string
+            - Name: cf_vwr_country_name
+              Type: string
+            - Name: cf_vwr_country_region
+              Type: string
+            - Name: cf_vwr_country_region_name
+              Type: string
+            - Name: cf_vwr_http_version
+              Type: string
+            - Name: cf_vwr_ja3_fingerprint
+              Type: string
+            - Name: cf_vwr_latitude
+              Type: string
+            - Name: cf_vwr_longitude
+              Type: string
+            - Name: cf_vwr_postal_code
+              Type: string
+            - Name: cf_vwr_time_zone
+              Type: string
+            - Name: cf_vwr_tls
+              Type: string
+            - Name: host
+              Type: string
+            - Name: referer
+              Type: string
+            - Name: user_agent
+              Type: string
+            - Name: via
+              Type: string
+            - Name: x_amz_cf_id
+              Type: string
+            - Name: x_amzn_trace_id
+              Type: string
+            - Name: ts
+              Type: string
+            - Name: ts_epoch_millis
+              Type: bigint
+            - Name: utm_source
+              Type: string
+            - Name: utm_medium
+              Type: string
+            - Name: utm_campaign
+              Type: string
+          Location: !Sub s3://${AnalyticsImportBucket}/${AnalyticsImportTableName}/
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          Compressed: false
+          NumberOfBuckets: -1
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+            Parameters:
+              serialization.format: '1'
+          BucketColumns: []
+          SortColumns: []
+          StoredAsSubDirectories: false
+        PartitionKeys:
+          - Name: site_fqdn
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        TableType: EXTERNAL_TABLE
+
+  AnalyticsImportTableParam:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/config/${Stage}/${Branch}/${AppName}/analytics_events_import_glue_table"
+      Type: "String"
+      Value: !Ref AnalyticsImportTable
+      Description: "Analytics logs import glue table name"
+
+  AnalyticsImportBucketNameParam:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/config/${Stage}/${Branch}/${AppName}/analytics_logs_import_bucket_name"
+      Type: "String"
+      Value: !Ref AnalyticsImportBucket
+      Description: "Analytics logs import bucket name"

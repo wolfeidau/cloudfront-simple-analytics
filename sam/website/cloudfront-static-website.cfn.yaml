@@ -1,0 +1,180 @@
+Transform: AWS::Serverless-2016-10-31
+Description: "wolfeidau: edge lambda with cloudfront and snowplow analytics."
+Parameters:
+  AppName:
+    Type: String
+    Description: The name of the application.
+
+  Stage:
+    Type: String
+    Description: The stage where the application is running in, e.g., dev, prod.
+    Default: "dev"
+
+  Branch:
+    Type: String
+    Description: The name of the branch being deployed, this enables parallel deployments per environment if required.
+    Default: "main"
+
+  AnalyticsFunctionUrl:
+    Type: String
+    Description: "The analytics function URL to use for tracking events."
+
+  AnalyticsFunctionArn:
+    Type: String
+    Description: "The analytics function ARN to use for tracking events."
+
+  PrimarySubDomainName:
+    Description: "Name that is used to create the assets DNS entry."
+    Type: String
+    Default: www
+
+  HostedZoneName:
+    Description: "Name that is used to create the DNS entry."
+    Type: String
+    Default: wolfe.id.au
+
+  HostedZoneId:
+    Description: "Hosted zone id that is used to create the DNS entry."
+    Type: String
+
+  AcmCertificateArn:
+    Description: "ARN of the ACM certificate for cloudfront, this must be created in us-east-1."
+    Type: String
+
+Outputs:
+  Host:
+    Value: !GetAtt Distribution.DomainName
+  Distribution:
+    Value: !Ref Distribution
+  ContentBucketName:
+    Value: !Ref Bucket
+
+Resources:
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource:
+              - !Sub "${Bucket.Arn}/*"
+            Principal:
+              Service: "cloudfront.amazonaws.com"
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:*
+            Resource:
+              - !Sub "arn:aws:s3:::${Bucket}/*"
+              - !Sub "arn:aws:s3:::${Bucket}"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  CloudFrontOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: S3 Origin Access Control
+        Name: !Sub "${AWS::StackName}-s3"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontOriginAccessControlLambda:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: Lambda Origin Access Control
+        Name: !Sub "${AWS::StackName}-lambda"
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AnalyticsFunctionArn
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution.Id}"
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2
+        Aliases:
+          - !Sub "${PrimarySubDomainName}.${HostedZoneName}"
+        DefaultRootObject: index.html
+        Origins:
+          - Id: !Ref AnalyticsFunctionUrl
+            DomainName: !Ref AnalyticsFunctionUrl
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+            OriginAccessControlId: !GetAtt CloudFrontOriginAccessControlLambda.Id
+          - Id: !Ref Bucket
+            DomainName: !GetAtt Bucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+            OriginAccessControlId: !GetAtt CloudFrontOriginAccessControl.Id
+        DefaultCacheBehavior:
+          TargetOriginId: !Ref Bucket
+          Compress: True
+          ForwardedValues:
+            QueryString: false
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+          ViewerProtocolPolicy: redirect-to-https
+        CacheBehaviors:
+          - TargetOriginId: !Ref AnalyticsFunctionUrl
+            PathPattern: /c3p1/*
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # Managed-AllViewerExceptHostHeader
+            ViewerProtocolPolicy: allow-all
+            Compress: true
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          MinimumProtocolVersion: "TLSv1.2_2021"
+          SslSupportMethod: sni-only
+
+  WebsiteRecordSet:
+    Type: "AWS::Route53::RecordSet"
+    Properties:
+      AliasTarget:
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-route53-aliastarget.html
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "${PrimarySubDomainName}.${HostedZoneName}"
+      Type: A
+
+  BucketNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/config/${Stage}/${Branch}/${AppName}/content_bucket_name"
+      Type: String
+      Value: !Ref Bucket
